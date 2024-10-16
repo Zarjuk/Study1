@@ -1,0 +1,57 @@
+import requests
+
+
+def get_order_book(symbol):
+    host = "https://api.gateio.ws"
+    prefix = "/api/v4"
+    url = '/spot/order_book'
+    headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+    query_param = f'currency_pair={symbol}&limit=5'
+
+    try:
+        r = requests.request('GET', host + prefix + url + "?" + query_param, headers=headers)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP ошибка: {http_err}")
+    except requests.exceptions.ConnectionError:
+        print("Ошибка подключения. Проверьте интернет-соединение.")
+    except requests.exceptions.Timeout:
+        print("Время ожидания истекло.")
+    except requests.exceptions.RequestException as err:
+        print(f"Произошла ошибка: {err}")
+    return None
+
+
+def display_order_book(symbol, order_book):
+    if not order_book:
+        print(f"Не удалось получить данные для пары {symbol}.")
+        return
+
+    print(f"\nОрдербук для пары {symbol}:")
+
+    if 'bids' in order_book and order_book['bids']:
+        print("Лучшие заявки на покупку (bids):")
+        for bid in order_book['bids']:
+            print(f"Цена: {bid[0]}, Количество: {bid[1]}")
+    else:
+        print("Нет данных о заявках на покупку (bids).")
+
+    if 'asks' in order_book and order_book['asks']:
+        print("\nЛучшие заявки на продажу (asks):")
+        for ask in order_book['asks']:
+            print(f"Цена: {ask[0]}, Количество: {ask[1]}")
+    else:
+        print("Нет данных о заявках на продажу (asks).")
+
+
+def checkprice():
+    symbols = ['BTC_USDT', 'ETH_USDT', 'SOL_USDT']
+    for symbol in symbols:
+        order_book = get_order_book(symbol)
+        if order_book:
+            display_order_book(symbol, order_book)
+
+
+if __name__ == "__main__":
+    checkprice()
