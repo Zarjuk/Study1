@@ -1,0 +1,139 @@
+import aiohttp
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram import F
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+TELEGRAM_TOKEN = 'your_telegram_bot_token'
+CHAT_ID = 'your_chat_id'
+
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+
+COINS = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "ADA-USDT"]
+
+UPDATE_INTERVAL = 60  # в секундах
+
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price?symbol="
+KUCOIN_URL = "https://api.kucoin.com/api/v1/market/allTickers"
+
+
+async def send_telegram_message(message_text):
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=message_text)
+        logging.info(f"Отправлено сообщение в Telegram: {message_text}")
+    except Exception as e:
+        logging.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+
+
+async def get_binance_prices(session, coins):
+    prices = {}
+    for coin in coins:
+        binance_symbol = coin.replace("-", "")
+        try:
+            async with session.get(BINANCE_URL + binance_symbol) as response:
+                data = await response.json()
+                prices[coin] = float(data["price"])
+        except Exception as e:
+            logging.error(f"Ошибка при запросе данных для {coin} с Binance: {e}")
+    return prices
+
+
+async def get_kucoin_prices(session, coins):
+    kucoin_prices = {}
+    try:
+        async with session.get(KUCOIN_URL) as response:
+            data = await response.json()
+            for token in data["data"]["ticker"]:
+                symbol = token["symbol"]
+                price = float(token["last"])
+                if symbol in coins:
+                    kucoin_prices[symbol] = price
+    except Exception as e:
+        logging.error(f"Ошибка при запросе данных с Kucoin: {e}")
+    return kucoin_prices
+
+
+async def compare_prices(binance_prices, kucoin_prices, threshold):
+    found_arbitrage = False
+    for coin in binance_prices:
+        binance_price = binance_prices[coin]
+        kucoin_price = kucoin_prices.get(coin)
+
+        if kucoin_price is None:
+            logging.warning(f"Монета {coin} не найдена на Kucoin")
+            continue
+
+        price_difference = abs(binance_price - kucoin_price) / ((binance_price + kucoin_price) / 2) * 100
+
+        if price_difference >= threshold:
+            found_arbitrage = True
+            if binance_price < kucoin_price:
+                buy_price = binance_price
+                sell_price = kucoin_price
+                exchange_buy = "Binance"
+                exchange_sell = "Kucoin"
+            else:
+                buy_price = kucoin_price
+                sell_price = binance_price
+                exchange_buy = "Kucoin"
+                exchange_sell = "Binance"
+
+            profit = sell_price - buy_price
+
+            message = (f"Знайдено арбітраж на монеті {coin.replace('-', '')} с {exchange_buy} на {exchange_sell}.\n"
+                       f"Покупка: {buy_price}$\n"
+                       f"Продажа: {sell_price}$\n"
+                       f"Профит: {profit:.5f}$")
+
+            logging.info(message)
+
+            await send_telegram_message(message)
+
+    if not found_arbitrage:
+        logging.info("Профит не найден. Программа продолжает работу.")
+
+
+async def main(spread_threshold):
+    session = aiohttp.ClientSession()  # Создаем сессию
+    try:
+        while True:
+            logging.info("Получаем цены с Binance и Kucoin...")
+
+            binance_prices = await get_binance_prices(session, COINS)
+            kucoin_prices = await get_kucoin_prices(session, COINS)
+
+            await compare_prices(binance_prices, kucoin_prices, spread_threshold)
+
+            logging.info(f"Ожидание {UPDATE_INTERVAL} секунд перед следующим обновлением...")
+            try:
+                await asyncio.sleep(UPDATE_INTERVAL)
+            except asyncio.CancelledError:
+                logging.info("Операция была отменена, завершение работы...")
+                break
+    finally:
+        await session.close()  # Закрываем сессию
+
+
+if __name__ == "__main__":
+    try:
+        spread_threshold_input = input("Введите порог для спреда (в процентах, по умолчанию 2%): ")
+        if spread_threshold_input:
+            # Замена запятой на точку и конвертация в float
+            spread_threshold = float(spread_threshold_input.replace(',', '.'))
+        else:
+            spread_threshold = 2.0  # Значение по умолчанию
+    except ValueError:
+        logging.error("Некорректный ввод порога, используется значение по умолчанию: 2%")
+        spread_threshold = 2.0
+
+    try:
+        asyncio.run(main(spread_threshold))
+    except KeyboardInterrupt:
+        logging.info("Программа была завершена вручную.")
+    except Exception as e:
+        logging.error(f"Произошла непредвиденная ошибка: {e}")
