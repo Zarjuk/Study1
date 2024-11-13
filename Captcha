@@ -1,0 +1,144 @@
+import requests
+import time
+import logging
+from web3 import Web3
+
+# Конфигурация
+API_KEY = "API-ключ CapMonster"
+SITE_KEY = "sitekey"
+WEBSITE_URL = "https://faucet.movementnetwork.xyz/"  
+CLAIM_URL = "https://mevm.devnet.imola.movementlabs.xyz/claim"
+ETH_ADDRESS = "ВАШ_ETHEREUM_АДРЕС"  # Ваш EVM-адрес кошелька для клейма токенов
+WEB3_PROVIDER = "https://rpc-endpoint.com"  # RPC-эндпоинт для проверки баланса на блокчейне
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
+
+class CaptchaSolver:
+    def __init__(self, api_key, site_key, website_url):
+        self.api_key = api_key
+        self.site_key = site_key
+        self.website_url = website_url
+        self.create_task_url = "https://api.capmonster.cloud/createTask"
+        self.get_result_url = "https://api.capmonster.cloud/getTaskResult"
+
+    def create_task(self):
+        task_payload = {
+            "clientKey": self.api_key,
+            "task": {
+                "type": "TurnstileTaskProxyless",
+                "websiteURL": self.website_url,
+                "websiteKey": self.site_key
+            }
+        }
+        try:
+            response = requests.post(self.create_task_url, json=task_payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("errorId") == 0:
+                task_id = result["taskId"]
+                logger.info(f"Задача капчи создана, task_id: {task_id}")
+                return task_id
+            else:
+                logger.error(f"Ошибка при создании задачи: {result.get('errorDescription')}")
+                return None
+        except requests.RequestException as e:
+            logger.error(f"Ошибка сети при создании задачи капчи: {e}")
+            return None
+
+    def get_result(self, task_id):
+        delay = 2
+        result_payload = {
+            "clientKey": self.api_key,
+            "taskId": task_id
+        }
+        while True:
+            try:
+                response = requests.post(self.get_result_url, json=result_payload, timeout=10)
+                response.raise_for_status()
+                result = response.json()
+                if result.get("status") == "ready":
+                    # Используем 'token' вместо 'gRecaptchaResponse' для Turnstile
+                    captcha_solution = result["solution"]["token"]
+                    logger.info(f"Решение капчи получено: {captcha_solution}")
+                    return captcha_solution
+                elif result.get("status") == "processing":
+                    logger.info("Капча еще решается, ожидаем...")
+                else:
+                    logger.error(f"Ошибка при решении капчи: {result.get('errorDescription')}")
+                    return None
+                time.sleep(delay)
+                delay = min(delay * 2, 30)  # Максимальная задержка 30 секунд
+            except requests.RequestException as e:
+                logger.error(f"Ошибка сети при получении результата капчи: {e}")
+                return None
+
+
+class TokenClaimer:
+    def __init__(self, claim_url, eth_address):
+        self.claim_url = claim_url
+        self.eth_address = eth_address
+
+    def claim_tokens(self, captcha_solution):
+        """Отправка запроса на клейм токенов"""
+        claim_payload = {"address": self.eth_address}
+        headers = {
+            "Content-Type": "application/json",
+            "g-recaptcha-response": captcha_solution
+        }
+        try:
+            response = requests.post(self.claim_url, json=claim_payload, headers=headers, timeout=10)
+            if response.status_code == 200:
+                logger.info("Токены успешно заклеймились!")
+                return True
+            else:
+                logger.error(f"Ошибка при клейме токенов: {response.status_code} - {response.text}")
+                return False
+        except requests.RequestException as e:
+            logger.error(f"Ошибка сети при клейме токенов: {e}")
+            return False
+
+
+class BalanceChecker:
+    def __init__(self, provider_url):
+        self.web3 = Web3(Web3.HTTPProvider(provider_url))
+
+    def check_balance(self, address):
+        """Проверка баланса на кошельке"""
+        if self.web3.isConnected():
+            balance = self.web3.eth.get_balance(address)
+            balance_in_eth = self.web3.fromWei(balance, 'ether')
+            logger.info(f"Баланс кошелька {address}: {balance_in_eth} ETH")
+            return balance_in_eth
+        else:
+            logger.error("Ошибка подключения к RPC для проверки баланса")
+            return None
+
+    def wait_for_balance_update(self, initial_balance, address, timeout=60, interval=10):
+        """Ожидание обновления баланса после клейма токенов"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            new_balance = self.check_balance(address)
+            if new_balance is not None and new_balance > initial_balance:
+                logger.info("Баланс обновлен!")
+                return True
+            time.sleep(interval)
+        logger.warning("Баланс не изменился в течение заданного времени")
+        return False
+
+
+# Основной процесс
+solver = CaptchaSolver(API_KEY, SITE_KEY, WEBSITE_URL)
+claimer = TokenClaimer(CLAIM_URL, ETH_ADDRESS)
+checker = BalanceChecker(WEB3_PROVIDER)
+
+task_id = solver.create_task()
+if task_id:
+    captcha_solution = solver.get_result(task_id)
+    if captcha_solution:
+        initial_balance = checker.check_balance(ETH_ADDRESS)
+        if initial_balance is not None:
+            if claimer.claim_tokens(captcha_solution):
+                logger.info("Ожидание обновления баланса...")
+                checker.wait_for_balance_update(initial_balance, ETH_ADDRESS)
