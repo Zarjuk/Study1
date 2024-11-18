@@ -1,0 +1,155 @@
+import logging
+import os
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from eth_utils.crypto import keccak
+from eth_abi import encode
+from web3 import Web3
+from web3.exceptions import ValidationError
+from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+def get_private_key():
+    private_key = os.getenv("PRIVATE_KEY")
+    if not private_key:
+        logger.error("Приватный ключ не найден. Убедитесь, что переменная PRIVATE_KEY указана в файле .env.")
+        raise ValueError("Приватный ключ не найден.")
+    logger.info("Приватный ключ успешно загружен из .env.")
+    return private_key
+
+w3 = Web3()
+
+def initialize_account(private_key):
+    try:
+        account = Account.from_key(private_key)
+        logger.info(f"Аккаунт успешно инициализирован. Адрес: {account.address}")
+        return account
+    except ValueError as e:
+        logger.error(f"Ошибка инициализации аккаунта: {e}")
+        raise
+
+def validate_address(address):
+    try:
+        if w3.is_address(address):  # Проверяем корректность формата адреса
+            logger.info(f"Адрес контракта валиден: {address}")
+            return True
+        else:
+            logger.error(f"Неверный адрес контракта: {address}")
+            raise ValueError(f"Неверный адрес контракта: {address}")
+    except Exception as e:
+        logger.error(f"Ошибка проверки адреса: {e}")
+        raise
+
+def hash_domain(domain):
+    try:
+        domain_type_hash = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+        domain_hash = keccak(
+            encode(
+                ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+                [
+                    domain_type_hash,
+                    keccak(text=domain["name"]),
+                    keccak(text=domain["version"]),
+                    domain["chainId"],
+                    domain["verifyingContract"],
+                ]
+            )
+        )
+        logger.debug(f"Хеш домена: {domain_hash.hex()}")
+        return domain_hash
+    except Exception as e:
+        logger.error(f"Ошибка при хешировании домена: {e}")
+        raise
+
+def hash_message(message):
+    try:
+        message_type_hash = keccak(text="Vote(uint256 proposalId,bool support)")
+        message_hash = keccak(
+            encode(
+                ["bytes32", "uint256", "bool"],
+                [
+                    message_type_hash,
+                    message["proposalId"],
+                    message["support"]
+                ]
+            )
+        )
+        logger.debug(f"Хеш сообщения: {message_hash.hex()}")
+        return message_hash
+    except Exception as e:
+        logger.error(f"Ошибка при хешировании сообщения: {e}")
+        raise
+
+def create_eip712_hash(domain, message):
+    try:
+        domain_hash = hash_domain(domain)
+        message_hash = hash_message(message)
+        eip712_hash = keccak(b"\x19\x01" + domain_hash + message_hash)
+        logger.info("EIP-712 хеш успешно создан.")
+        return eip712_hash
+    except Exception as e:
+        logger.error(f"Ошибка при создании EIP-712 хеша: {e}")
+        raise
+
+def sign_message(account, eip712_hash):
+    try:
+        message = encode_defunct(hexstr=eip712_hash.hex())
+        signed_data = account.sign_message(message)
+        logger.info("Сообщение успешно подписано.")
+        return signed_data
+    except Exception as e:
+        logger.error(f"Ошибка при подписании сообщения: {e}")
+        raise
+
+def verify_signature(message, signature, expected_address):
+    try:
+        recovered_address = Account.recover_message(message, signature=signature)
+        if recovered_address == expected_address:
+            logger.info("Сигнатура проверена — она валидна.")
+            return True
+        else:
+            logger.warning("Сигнатура недействительна.")
+            return False
+    except ValidationError as e:
+        logger.error(f"Ошибка при восстановлении адреса: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при проверке подписи: {e}")
+        return False
+
+# Метод тестирования всей цепочки
+def run_test():
+    try:
+        private_key = get_private_key()
+        account = initialize_account(private_key)
+
+        domain = {
+            "name": "Uniswap",
+            "version": "1",
+            "chainId": 1,
+            "verifyingContract": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+        }
+        validate_address(domain["verifyingContract"])
+
+        message = {
+            "proposalId": 1,
+            "support": True
+        }
+
+        eip712_hash = create_eip712_hash(domain, message)
+        signed_data = sign_message(account, eip712_hash)
+
+        verification_message = encode_defunct(hexstr=eip712_hash.hex())
+        if verify_signature(verification_message, signed_data.signature, account.address):
+            logger.info("Подпись успешно прошла проверку.")
+        else:
+            logger.warning("Подпись не прошла проверку.")
+    except Exception as e:
+        logger.error(f"Тест завершился с ошибкой: {e}")
+
+if __name__ == "__main__":
+    run_test()
